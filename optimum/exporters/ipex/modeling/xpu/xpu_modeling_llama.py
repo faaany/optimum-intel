@@ -46,6 +46,7 @@ class _IPEXLlamaAttentionXPU(_IPEXLlamaAttention):
         self.num_kv_heads = module.num_key_value_heads
         self.embed_dim = module.config.hidden_size
         self.port_parameters(module)
+        torch.xpu.empty_cache()
         from intel_extension_for_pytorch.llm.modules import RotaryEmbedding
 
         # self.ipex_rope = RotaryEmbedding(
