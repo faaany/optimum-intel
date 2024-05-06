@@ -42,7 +42,7 @@ from transformers import (
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.modeling_outputs import CausalLMOutputWithPast, ModelOutput
 from transformers.models.auto.auto_factory import _get_model_class as get_model_class
-from transformers.utils import WEIGHTS_NAME
+from transformers.utils import WEIGHTS_NAME, is_torch_xpu_available
 
 from optimum.exporters import TasksManager
 from optimum.modeling_base import OptimizedModel
@@ -61,8 +61,6 @@ _IPEX_SUPPORT_MODEL_TYPES = ("llama",)
 
 
 def _is_patched_with_ipex(model, task):
-    if is_ipex_version("<", "2.5.0"):
-        return False
 
     if isinstance(model, torch.jit.ScriptModule):
         for node in model.graph.nodes():
@@ -162,7 +160,12 @@ class IPEXModel(OptimizedModel):
     ):
         if is_torch_version("<", "2.1.0"):
             raise ImportError("`torch>=2.0.0` is needed to trace your model")
-
+        
+        if is_torch_xpu_available(check_device=True):
+            device = "xpu"
+        else:
+            device = "cpu"
+            
         task = cls.export_feature
         model_kwargs = {
             "revision": revision,
@@ -173,15 +176,27 @@ class IPEXModel(OptimizedModel):
             "force_download": force_download,
             "torch_dtype": torch_dtype,
             "trust_remote_code": trust_remote_code,
+            "device": device
         }
 
         model = TasksManager.get_model_from_task(task, model_id, **model_kwargs)
-        traced_model = ipex_jit_trace(model, task, use_cache)
 
         config.torchscript = True
         config.torch_dtype = torch_dtype
 
-        return cls(traced_model, config=config, model_save_dir=model_id, use_cache=use_cache, warmup=False)
+        if "cpu" in str(model.device):
+            traced_model = ipex_jit_trace(model, task, use_cache)
+            return cls(traced_model, config=config, model_save_dir=model_id, use_cache=use_cache, warmup=False)
+        else:
+            from optimum.exporters.ipex.model_patcher import _patch_model
+            
+            if _is_patched_with_ipex(model, task):
+                model = _patch_model(model)
+            else:
+                pass 
+                
+            return model       
+    
 
     @classmethod
     def _from_pretrained(
