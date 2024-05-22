@@ -24,7 +24,6 @@ from transformers.models.llama.modeling_llama import repeat_kv
 from optimum.intel.utils.import_utils import is_ipex_version
 
 import intel_extension_for_pytorch as ipex
-from intel_extension_for_pytorch.transformers.models.xpu.fusions.mha_fusion import _IPEXRopeXPU
 
 
 def matmul_add_add(attn_output, weight, bias=None, residual=None):
@@ -369,15 +368,32 @@ class _IPEXLlamaAttention(nn.Module):
         self.head_dim = module.head_dim
         self.num_kv_heads = module.num_key_value_heads
         self.embed_dim = module.config.hidden_size
-        self.port_parameters(module)
-        torch.xpu.empty_cache()
-        
-        self.ipex_rope = _IPEXRopeXPU(
+        module_device = str(module.q_proj.weight.device)
+        if "xpu" in module_device:
+            self.ipex_scale_dot_product = None
+            
+            from intel_extension_for_pytorch.transformers.models.xpu.fusions.mha_fusion import _IPEXRopeXPU
+            self.ipex_rope = _IPEXRopeXPU(
+                module.config.max_position_embeddings,
+                module.config.hidden_size // module.config.num_attention_heads,
+                module.config.rope_theta,
+                module.config.architectures[0],
+            )
+            self.port_parameters(module)
+            torch.xpu.empty_cache()
+            
+        else:
+            from intel_extension_for_pytorch.llm.modules import IndirectAccessKVCache
+            from intel_extension_for_pytorch.llm.modules import RotaryEmbedding
+            self.ipex_scale_dot_product = IndirectAccessKVCache(text_max_length=module.config.max_position_embeddings)
+            
+            self.ipex_rope = RotaryEmbedding(
             module.config.max_position_embeddings,
             module.config.hidden_size // module.config.num_attention_heads,
             module.config.rope_theta,
             module.config.architectures[0],
         )
+
 
     def forward(
         self,
@@ -603,13 +619,8 @@ class _IPEXLlamaDecoderLayer(nn.Module):
     def __init__(self, module, config, distributed=False) -> None:
         super().__init__()
         self.layer_idx = module.self_attn.layer_idx
-        module_device = str(module.self_attn.q_proj.weight.device)
-        if "xpu" in module_device:
-            self.attn = _IPEXLlamaAttention(module.self_attn, config, distributed)
-            self.mlp = _IPEXLlamaMLP(module.mlp, config, distributed)
-        else:
-            self.attn = _IPEXLlamaAttention(module.self_attn, config, distributed)
-            self.mlp = _IPEXLlamaMLP(module.mlp, config, distributed)
+        self.attn = _IPEXLlamaAttention(module.self_attn, config, distributed)
+        self.mlp = _IPEXLlamaMLP(module.mlp, config, distributed)
         self.input_layernorm = ipex.llm.modules.RMSNorm(
             module.input_layernorm.weight, module.input_layernorm.variance_epsilon
         )
