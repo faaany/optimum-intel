@@ -20,16 +20,17 @@ from transformers.models.llama.modeling_llama import (
     LlamaRMSNorm,
 )
 
+from transformers import is_torch_xpu_available
+
 from optimum.intel.utils.import_utils import is_ipex_version
 
 from .modeling_utils import (
     _IPEXLlamaDecoderLayerRef,
+    _IPEXLlamaDecoderLayer,
     _llama_attn_forward,
     _llama_layer_norm_forward,
     _llama_model_forward,
 )
-
-from .modeling.modeling_llama import _IPEXLlamaDecoderLayer
 
 _IPEX_EXPORTED_ARCH = ("LlamaForCausalLM",)
 _IPEX_EXPORTED_TASK = ("text-generation",)
