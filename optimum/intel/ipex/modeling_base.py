@@ -171,9 +171,7 @@ class IPEXModel(OptimizedModel):
         local_files_only: bool = False,
         torch_dtype: Optional[Union[str, "torch.dtype"]] = None,
         trust_remote_code: bool = False,
-        **kwargs,
     ):
-        device_map = kwargs.pop("device_map", None)
         if use_auth_token is not None:
             warnings.warn(
                 "The `use_auth_token` argument is deprecated and will be removed in v5 of Transformers. Please use `token` instead.",
@@ -195,7 +193,6 @@ class IPEXModel(OptimizedModel):
             "force_download": force_download,
             "torch_dtype": torch_dtype,
             "trust_remote_code": trust_remote_code,
-            "device_map": device_map,
         }
 
         model = TasksManager.get_model_from_task(task, model_id, **model_kwargs)
