@@ -196,7 +196,7 @@ class IPEXModel(OptimizedModel):
         }
 
         model = TasksManager.get_model_from_task(task, model_id, **model_kwargs)
-        
+
         if is_torch_xpu_available(check_device=True):
             model.to("xpu:0")
             if _is_patched_with_ipex(model, task):
@@ -207,9 +207,8 @@ class IPEXModel(OptimizedModel):
             model = ipex_jit_trace(model, task, use_cache)
             config.torchscript = True
             config.torch_dtype = torch_dtype
-        
-        return cls(model, config=config, model_save_dir=model_id, use_cache=use_cache, warmup=False)
 
+        return cls(model, config=config, model_save_dir=model_id, use_cache=use_cache, warmup=False)
 
     @classmethod
     def _from_pretrained(

@@ -15,15 +15,12 @@ import gc
 import math
 from typing import List, Optional, Tuple, Union
 
+import intel_extension_for_pytorch as ipex
 import torch
 from torch import nn
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.llama.modeling_llama import repeat_kv
-
-from optimum.intel.utils.import_utils import is_ipex_version
-
-import intel_extension_for_pytorch as ipex
 
 
 def matmul_add_add(attn_output, weight, bias=None, residual=None):
@@ -45,10 +42,12 @@ def matmul_add_add(attn_output, weight, bias=None, residual=None):
     attn_output = attn_output.view(seq_len, bs, -1)
     return attn_output
 
+
 def reference_elimination(c, b):
     for item in gc.get_objects():
         if isinstance(item, torch.Tensor) and item.data_ptr() == c.data_ptr() and item is not c:
             item.data = b
+
 
 def padding_attn_mask(attn_mask, alignment):
     if attn_mask is None:
@@ -64,6 +63,7 @@ def padding_attn_mask(attn_mask, alignment):
     new_attn_mask = torch.empty(mask_size, dtype=attn_mask.dtype, device=attn_mask.device).fill_(-65504.0)
     new_attn_mask[..., :last_dim_size] = attn_mask
     return new_attn_mask
+
 
 def init_empty_tensors(shape, dtype, device):
     return torch.empty(shape, dtype=dtype, device=device)
@@ -180,7 +180,7 @@ def _llama_model_forward(
         attentions=all_self_attns,
     )
 
-            
+
 class _IPEXLlamaAttention(nn.Module):
     def __init__(self, module, config, distributed=False, optimized_module=None) -> None:
         super().__init__()
@@ -194,8 +194,9 @@ class _IPEXLlamaAttention(nn.Module):
         self.module_device = module.q_proj.weight.device.type
         if self.module_device == "xpu":
             self.ipex_scale_dot_product = None
-            
+
             from intel_extension_for_pytorch.transformers.models.xpu.fusions.mha_fusion import _IPEXRopeXPU
+
             self.ipex_rope = _IPEXRopeXPU(
                 module.config.max_position_embeddings,
                 module.config.hidden_size // module.config.num_attention_heads,
@@ -204,23 +205,22 @@ class _IPEXLlamaAttention(nn.Module):
             )
             self.port_parameters(module)
             torch.xpu.empty_cache()
-            
+
         else:
-            from intel_extension_for_pytorch.llm.modules import IndirectAccessKVCache
-            from intel_extension_for_pytorch.llm.modules import RotaryEmbedding
+            from intel_extension_for_pytorch.llm.modules import IndirectAccessKVCache, RotaryEmbedding
+
             self.ipex_scale_dot_product = IndirectAccessKVCache(text_max_length=module.config.max_position_embeddings)
-            
+
             self.ipex_rope = RotaryEmbedding(
-            module.config.max_position_embeddings,
-            module.config.hidden_size // module.config.num_attention_heads,
-            module.config.rope_theta,
-            module.config.architectures[0],
-        )
-        
+                module.config.max_position_embeddings,
+                module.config.hidden_size // module.config.num_attention_heads,
+                module.config.rope_theta,
+                module.config.architectures[0],
+            )
 
     def qkv_gemm(self, hidden_states, prev_seqlen):
         bs, seqlen, _ = hidden_states.size()
-        
+
         if self.module_device == "cpu":
             query = self.q_proj(hidden_states)
             key = self.k_proj(hidden_states)
@@ -257,7 +257,7 @@ class _IPEXLlamaAttention(nn.Module):
             query = query.view([bs, seqlen, self.num_heads, self.head_dim])
             key = key.view([bs, seqlen + prev_seqlen, self.num_kv_heads, self.head_dim])
             value = value.view([bs, seqlen + prev_seqlen, self.num_kv_heads, self.head_dim])
-            
+
         return query, key, value
 
     def rope(self, query, key, value, past_key_value, position_ids, seqlen, prev_seqlen, sin, cos):
@@ -269,7 +269,7 @@ class _IPEXLlamaAttention(nn.Module):
                 self.head_dim,
                 self.head_dim // 2,
                 self.head_dim,
-                prev_seqlen+seqlen,
+                prev_seqlen + seqlen,
             )
             query = self.ipex_rope(
                 query,
@@ -278,8 +278,8 @@ class _IPEXLlamaAttention(nn.Module):
                 self.head_dim,
                 self.head_dim // 2,
                 self.head_dim,
-                prev_seqlen+seqlen,
-            ) 
+                prev_seqlen + seqlen,
+            )
         else:
             self.ipex_rope.apply_embedding(query, sin, cos, self.head_dim // 2, key[:, prev_seqlen:, :, :])
 
@@ -290,8 +290,8 @@ class _IPEXLlamaAttention(nn.Module):
             query = query.transpose(1, 2)
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
-        
-        return query, key, value       
+
+        return query, key, value
 
     def sdpa(self, query, key, value, past_key_value, attention_mask, bs, seqlen, residual, use_cache):
         if self.module_device == "cpu":
@@ -343,10 +343,10 @@ class _IPEXLlamaAttention(nn.Module):
 
     def get_present(self, key, value, past_key_value, use_cache):
         if self.module_device == "cpu":
-            return past_key_value 
+            return past_key_value
         else:
-            return (key, value) if use_cache else None  
-        
+            return (key, value) if use_cache else None
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -376,14 +376,14 @@ class _IPEXLlamaAttention(nn.Module):
         """
         # allocate cache and copy past_key_value
         bs, seqlen, _ = hidden_states.size()
-        prev_seqlen = past_key_value[0].size(-2) if past_key_value is not None else 0                                                                                                                                           
+        prev_seqlen = past_key_value[0].size(-2) if past_key_value is not None else 0
         query, key, value = self.qkv_gemm(hidden_states, prev_seqlen)
         sin = kwargs.pop("sin", None)
         cos = kwargs.pop("cos", None)
         query, key, value = self.rope(query, key, value, past_key_value, position_ids, seqlen, prev_seqlen, sin, cos)
         attn_output = self.sdpa(query, key, value, past_key_value, attention_mask, bs, seqlen, residual, use_cache)
         present = self.get_present(key, value, past_key_value, use_cache)
-        
+
         outputs = (attn_output, present)
         if output_attentions:
             raise ValueError("not support output attn_weight")
@@ -463,12 +463,12 @@ class _IPEXLlamaAttention(nn.Module):
                     module.v_proj.bias.data, self.qkv_proj_bias[:, group + 1, self.head_dim].view(-1)
                 )
                 module.v_proj.bias.data = self.qkv_proj_bias[:, group + 1, self.head_dim].view(-1)
-        
+
         self.o_proj_weight = module.o_proj.weight.transpose(0, 1).contiguous()
         reference_elimination(module.o_proj.weight.data, self.o_proj_weight.transpose(0, 1))
         module.o_proj.weight.data = self.o_proj_weight.transpose(0, 1)
         self.o_proj_bias = module.o_proj.bias
-        
+
 
 class _IPEXLlamaMLP(nn.Module):
     def __init__(self, module, config, distributed=False, optimized_module=None) -> None:
@@ -485,24 +485,23 @@ class _IPEXLlamaMLP(nn.Module):
             self.port_parameter(module)
         else:
             from intel_extension_for_pytorch.llm.modules import Linear2SiluMul, LinearAdd
-            
+
             for k, v in module.__dict__.items():
                 setattr(self, k, v)
             for k, v in module.__class__.__dict__.items():
                 if k.startswith("__") or k.startswith("forward"):
                     continue
                 setattr(self.__class__, k, getattr(module.__class__, k))
-            
+
             if not self.distributed:
                 self.mha_linear_add = LinearAdd(module.self_attn.o_proj)
                 self.mlp_linear_add = LinearAdd(module.mlp.down_proj)
                 del self.__dict__["_modules"]["self_attn"].o_proj
                 del self.__dict__["_modules"]["mlp"].down_proj
-            
+
             self.linear_silu_mul = Linear2SiluMul(module.mlp.gate_proj, module.mlp.up_proj)
             del self.__dict__["_modules"]["mlp"].gate_proj
             del self.__dict__["_modules"]["mlp"].up_proj
-        
 
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor = None, **kwargs):
         """
@@ -519,11 +518,10 @@ class _IPEXLlamaMLP(nn.Module):
         else:
             up = torch.ops.torch_ipex.mm_silu(hidden_states, self.gate_proj_weight)
             hidden_states = torch.ops.torch_ipex.mm_resmul(hidden_states, self.up_proj_weight, up)
-            hidden_states = matmul_add_add(hidden_states, self.down_proj_weight, self.down_proj_bias, residual) 
-            
+            hidden_states = matmul_add_add(hidden_states, self.down_proj_weight, self.down_proj_bias, residual)
+
         return hidden_states
-    
-        
+
     def port_parameter(self, module):
         self.up_proj_weight = module.up_proj.weight.transpose(0, 1).contiguous()
         reference_elimination(module.up_proj.weight.data, self.up_proj_weight.transpose(0, 1))
@@ -537,8 +535,8 @@ class _IPEXLlamaMLP(nn.Module):
         self.up_proj_bias = module.up_proj.bias
         self.gate_proj_bias = module.gate_proj.bias
         self.down_proj_bias = module.down_proj.bias
-        
-        
+
+
 class _IPEXLlamaDecoderLayer(nn.Module):
     def __init__(self, module, config, distributed=False) -> None:
         super().__init__()
@@ -551,7 +549,7 @@ class _IPEXLlamaDecoderLayer(nn.Module):
         self.post_attention_layernorm = ipex.llm.modules.RMSNorm(
             module.post_attention_layernorm.weight, module.post_attention_layernorm.variance_epsilon
         )
-        
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -598,11 +596,11 @@ class _IPEXLlamaDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states, residual, **kwargs)
 
         outputs = (hidden_states,)
-        
+
         if output_attentions:
             outputs += (self_attn_weight,)
-            
+
         if use_cache:
-            outputs += (present_key_value,)    
+            outputs += (present_key_value,)
 
         return outputs

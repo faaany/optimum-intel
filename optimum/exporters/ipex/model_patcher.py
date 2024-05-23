@@ -13,14 +13,10 @@
 #  limitations under the License.
 
 from transformers.models.llama.modeling_llama import (
-    LlamaAttention,
     LlamaDecoderLayer,
     LlamaForCausalLM,
     LlamaModel,
-    LlamaRMSNorm,
 )
-
-from transformers import is_torch_xpu_available
 
 from optimum.intel.utils.import_utils import is_ipex_version
 
@@ -28,6 +24,7 @@ from .modeling_utils import (
     _IPEXLlamaDecoderLayer,
     _llama_model_forward,
 )
+
 
 _IPEX_EXPORTED_ARCH = ("LlamaForCausalLM",)
 _IPEX_EXPORTED_TASK = ("text-generation",)
@@ -61,14 +58,13 @@ def patch_op(m, target_m, new_op_name, new_op):
 
 
 def _patch_llama_model(model):
-
     ipex_version = "2.1.0" if "xpu" in str(model.device) else "2.3.0"
     if is_ipex_version("<", ipex_version):
         raise ImportError(f"Only ipex version >= {ipex_version} supports ipex model patching")
 
     convert_functions(model, LlamaModel, "forward", _llama_model_forward)
     convert_class(model, LlamaDecoderLayer, _IPEXLlamaDecoderLayer, model.config)
-        
+
     return model
 
 
