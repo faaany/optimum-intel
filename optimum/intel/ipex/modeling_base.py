@@ -72,7 +72,7 @@ def _is_patched_with_ipex(model, task):
                 return True
         return False
     else:
-        ipex_version = "2.2.0" if "xpu" in str(model.device) else "2.5.0"
+        ipex_version = "2.1.0" if "xpu" in str(model.device) else "2.5.0"
         if is_ipex_version("<", ipex_version):
             return False
         return model.config.model_type in _IPEX_SUPPORT_MODEL_TYPES and task in _IPEX_EXPORTED_TASK
@@ -147,7 +147,7 @@ class IPEXModel(OptimizedModel):
                 inputs.debugName().split(".")[0] for inputs in model.graph.inputs() if inputs.debugName() != "self"
             }
         else:
-            self.input_names = {"past_key_values": None}
+            self.input_names = {"past_key_values": None, "position_ids": None}
         # Registers the IPEXModelForXXX classes into the transformers AutoModel classes to avoid warnings when creating
         # a pipeline https://github.com/huggingface/transformers/blob/cad61b68396a1a387287a8e2e2fef78a25b79383/src/transformers/pipelines/base.py#L863
         AutoConfig.register(self.base_model_prefix, AutoConfig)
