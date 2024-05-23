@@ -62,9 +62,9 @@ def patch_op(m, target_m, new_op_name, new_op):
 
 def _patch_llama_model(model):
 
-    ipex_version = "2.1.0" if "xpu" in str(model.device) else "2.5.0"
+    ipex_version = "2.1.0" if "xpu" in str(model.device) else "2.3.0"
     if is_ipex_version("<", ipex_version):
-        raise ImportError(f"Only ipex version >= {ipex_version} supports RotaryEmbedding and IndirectAccessKVCache")
+        raise ImportError(f"Only ipex version >= {ipex_version} supports ipex model patching")
 
     convert_functions(model, LlamaModel, "forward", _llama_model_forward)
     convert_class(model, LlamaDecoderLayer, _IPEXLlamaDecoderLayer, model.config)

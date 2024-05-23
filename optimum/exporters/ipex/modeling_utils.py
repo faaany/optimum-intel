@@ -65,6 +65,9 @@ def padding_attn_mask(attn_mask, alignment):
     new_attn_mask[..., :last_dim_size] = attn_mask
     return new_attn_mask
 
+def init_empty_tensors(shape, dtype, device):
+    return torch.empty(shape, dtype=dtype, device=device)
+
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.38.2/src/transformers/models/llama/modeling_llama.py#L1130
 def _llama_model_forward(
@@ -217,6 +220,7 @@ class _IPEXLlamaAttention(nn.Module):
 
     def qkv_gemm(self, hidden_states, prev_seqlen):
         bs, seqlen, _ = hidden_states.size()
+        
         if self.module_device == "cpu":
             query = self.q_proj(hidden_states)
             key = self.k_proj(hidden_states)
@@ -226,20 +230,15 @@ class _IPEXLlamaAttention(nn.Module):
             key = key.view(bs, seqlen, self.num_kv_heads, self.head_dim)
             value = value.view(bs, seqlen, self.num_kv_heads, self.head_dim)
         else:
+            dtype = hidden_states.dtype
+            device = hidden_states.device
+            shape1 = (bs, seqlen, self.num_heads * self.head_dim)
+            shape2 = (bs, prev_seqlen + seqlen, self.num_heads * self.head_dim)
+            shape3 = (bs, seqlen, self.num_kv_heads * self.head_dim)
             if self.num_kv_heads == self.num_heads:
-                query = torch.empty(
-                    (bs, seqlen, self.num_heads * self.head_dim), dtype=hidden_states.dtype, device=hidden_states.device
-                )
-                key = torch.empty(
-                    (bs, prev_seqlen + seqlen, self.num_heads * self.head_dim),                                                           
-                    dtype=hidden_states.dtype,
-                    device=hidden_states.device,
-                )                                
-                value = torch.empty(
-                    (bs, prev_seqlen + seqlen, self.num_heads * self.head_dim),
-                    dtype=hidden_states.dtype,
-                    device=hidden_states.device,
-                )
+                query = init_empty_tensors(shape1, dtype, device)
+                key = init_empty_tensors(shape2, dtype, device)
+                value = init_empty_tensors(shape2, dtype, device)
                 torch.ops.torch_ipex.mm_qkv_out(
                     hidden_states,
                     self.qkv_proj_weight,
@@ -249,19 +248,12 @@ class _IPEXLlamaAttention(nn.Module):
                     value[:, prev_seqlen:, :],
                 )
             else:
-                query = torch.empty(
-                    (bs, seqlen, self.num_heads * self.head_dim), dtype=hidden_states.dtype, device=hidden_states.device
-                )
-                key = torch.empty(
-                    (bs, seqlen, self.num_kv_heads * self.head_dim), dtype=hidden_states.dtype, device=hidden_states.device
-                )
-                value = torch.empty(
-                    (bs, seqlen, self.num_kv_heads * self.head_dim), dtype=hidden_states.dtype, device=hidden_states.device
-                )
+                query = init_empty_tensors(shape1, dtype, device)
+                key = init_empty_tensors(shape3, dtype, device)
+                value = init_empty_tensors(shape3, dtype, device)
                 torch.ops.torch_ipex.mm_qkv_group_out(
                     hidden_states, self.qkv_proj_weight, self.qkv_proj_bias, query, key, value
                 )
-
             query = query.view([bs, seqlen, self.num_heads, self.head_dim])
             key = key.view([bs, seqlen + prev_seqlen, self.num_kv_heads, self.head_dim])
             value = value.view([bs, seqlen + prev_seqlen, self.num_kv_heads, self.head_dim])
@@ -299,15 +291,9 @@ class _IPEXLlamaAttention(nn.Module):
             key = key.transpose(1, 2)
             value = value.transpose(1, 2)
         
-        return query, key, value 
+        return query, key, value       
 
-    def get_present(self, key, value, past_key_value, use_cache):
-        if self.module_device == "cpu":
-            return past_key_value 
-        else:
-            return (key, value) if use_cache else None        
-
-    def sdpa(self, query, key, value, attention_mask, past_key_value, bs, seqlen, residual, use_cache):
+    def sdpa(self, query, key, value, past_key_value, attention_mask, bs, seqlen, residual, use_cache):
         if self.module_device == "cpu":
             if use_cache:
                 # This ipex op pre-allocates buffers for past_key_values and use beam index history
@@ -355,7 +341,12 @@ class _IPEXLlamaAttention(nn.Module):
             )
         return attn_output
 
-    
+    def get_present(self, key, value, past_key_value, use_cache):
+        if self.module_device == "cpu":
+            return past_key_value 
+        else:
+            return (key, value) if use_cache else None  
+        
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -390,7 +381,7 @@ class _IPEXLlamaAttention(nn.Module):
         sin = kwargs.pop("sin", None)
         cos = kwargs.pop("cos", None)
         query, key, value = self.rope(query, key, value, past_key_value, position_ids, seqlen, prev_seqlen, sin, cos)
-        attn_output = self.sdpa(query, key, value, attention_mask, past_key_value, bs, seqlen, residual, use_cache)
+        attn_output = self.sdpa(query, key, value, past_key_value, attention_mask, bs, seqlen, residual, use_cache)
         present = self.get_present(key, value, past_key_value, use_cache)
         
         outputs = (attn_output, present)
@@ -472,6 +463,7 @@ class _IPEXLlamaAttention(nn.Module):
                     module.v_proj.bias.data, self.qkv_proj_bias[:, group + 1, self.head_dim].view(-1)
                 )
                 module.v_proj.bias.data = self.qkv_proj_bias[:, group + 1, self.head_dim].view(-1)
+        
         self.o_proj_weight = module.o_proj.weight.transpose(0, 1).contiguous()
         reference_elimination(module.o_proj.weight.data, self.o_proj_weight.transpose(0, 1))
         module.o_proj.weight.data = self.o_proj_weight.transpose(0, 1)
@@ -487,20 +479,51 @@ class _IPEXLlamaMLP(nn.Module):
         self.mlp_impl = None
         if optimized_module is not None:
             self.mlp_impl = optimized_module
-        module_device = str(module.gate_proj.weight.device)
-        if "xpu" in module_device:
+        module_device = module.gate_proj.weight.device.type
+        self.module_device = module_device
+        if self.module_device == "xpu":
             self.port_parameter(module)
+        else:
+            from intel_extension_for_pytorch.llm.modules import Linear2SiluMul, LinearAdd
+            
+            for k, v in module.__dict__.items():
+                setattr(self, k, v)
+            for k, v in module.__class__.__dict__.items():
+                if k.startswith("__") or k.startswith("forward"):
+                    continue
+                setattr(self.__class__, k, getattr(module.__class__, k))
+            
+            if not self.distributed:
+                self.mha_linear_add = LinearAdd(module.self_attn.o_proj)
+                self.mlp_linear_add = LinearAdd(module.mlp.down_proj)
+                del self.__dict__["_modules"]["self_attn"].o_proj
+                del self.__dict__["_modules"]["mlp"].down_proj
+            
+            self.linear_silu_mul = Linear2SiluMul(module.mlp.gate_proj, module.mlp.up_proj)
+            del self.__dict__["_modules"]["mlp"].gate_proj
+            del self.__dict__["_modules"]["mlp"].up_proj
+        
 
     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor = None, **kwargs):
         """
         Args:
             hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
         """
-        up = torch.ops.torch_ipex.mm_silu(hidden_states, self.gate_proj_weight)
-        out = torch.ops.torch_ipex.mm_resmul(hidden_states, self.up_proj_weight, up)
-        out = matmul_add_add(out, self.down_proj_weight, self.down_proj_bias, residual)
-        return out
-
+        if self.module_device == "cpu":
+            mlp_gate = self.linear_silu_mul(hidden_states)
+            if not self.distributed:
+                hidden_states = self.mlp_linear_add(mlp_gate, residual)
+            else:
+                hidden_states = self.mlp.down_proj(mlp_gate)
+                hidden_states = residual + hidden_states
+        else:
+            up = torch.ops.torch_ipex.mm_silu(hidden_states, self.gate_proj_weight)
+            hidden_states = torch.ops.torch_ipex.mm_resmul(hidden_states, self.up_proj_weight, up)
+            hidden_states = matmul_add_add(hidden_states, self.down_proj_weight, self.down_proj_bias, residual) 
+            
+        return hidden_states
+    
+        
     def port_parameter(self, module):
         self.up_proj_weight = module.up_proj.weight.transpose(0, 1).contiguous()
         reference_elimination(module.up_proj.weight.data, self.up_proj_weight.transpose(0, 1))
@@ -528,31 +551,7 @@ class _IPEXLlamaDecoderLayer(nn.Module):
         self.post_attention_layernorm = ipex.llm.modules.RMSNorm(
             module.post_attention_layernorm.weight, module.post_attention_layernorm.variance_epsilon
         )
-
-    def preprocess_for_optimize(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        postion_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.Tensor]] = None,
-        output_attention: Optional[bool] = True,
-        use_cache: Optional[bool] = False,
-        **kwargs,
-    ):
-        return hidden_states, attention_mask, postion_ids, past_key_value
-
-
-    def postprocess_for_optimize(
-        self, hidden_states, output_attention, use_cache, self_attn_weight, present_key_value, **kwargs
-    ):
-        outputs = (hidden_states,)
-        if use_cache:
-            outputs += (present_key_value,)
-        if output_attention:
-            outputs += (self_attn_weight,)
-
-        return outputs
-
+        
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -577,10 +576,6 @@ class _IPEXLlamaDecoderLayer(nn.Module):
                 (see `past_key_values`).
             past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
         """
-        outputs = self.preprocess_for_optimize(
-            hidden_states, attention_mask, position_ids, past_key_value, output_attentions, use_cache, **kwargs
-        )
-        (hidden_states, attention_mask, position_ids, past_key_value) = outputs
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
 
@@ -602,8 +597,12 @@ class _IPEXLlamaDecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states, residual, **kwargs)
 
-        outputs = self.postprocess_for_optimize(
-            hidden_states, output_attentions, use_cache, self_attn_weight, present_key_value, **kwargs
-        )
+        outputs = (hidden_states,)
+        
+        if output_attentions:
+            outputs += (self_attn_weight,)
+            
+        if use_cache:
+            outputs += (present_key_value,)    
 
         return outputs

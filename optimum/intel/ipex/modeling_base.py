@@ -64,7 +64,7 @@ _IPEX_SUPPORT_MODEL_TYPES = ("llama",)
 
 def _is_patched_with_ipex(model, task):
     if isinstance(model, torch.jit.ScriptModule):
-        if is_ipex_version("<", "2.5.0"):
+        if is_ipex_version("<", "2.3.0"):
             return False
         for node in model.graph.nodes():
             # Jit will record the codes position so we can check if the node use ipex exporter.
@@ -72,7 +72,7 @@ def _is_patched_with_ipex(model, task):
                 return True
         return False
     else:
-        ipex_version = "2.1.0" if "xpu" in str(model.device) else "2.5.0"
+        ipex_version = "2.1.0" if "xpu" in str(model.device) else "2.3.0"
         if is_ipex_version("<", ipex_version):
             return False
         return model.config.model_type in _IPEX_SUPPORT_MODEL_TYPES and task in _IPEX_EXPORTED_TASK
