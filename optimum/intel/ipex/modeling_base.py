@@ -129,15 +129,14 @@ class IPEXModel(OptimizedModel):
         **kwargs,
     ):
         OptimizedModel.__init__(self, model=model, config=config)
-        # To do: add XPU support
         if is_torch_xpu_available(check_device=True):
             self._device = torch.device("xpu:0")
         elif torch.cuda.is_available():
             self._device = torch.device("cuda:0")
         else:
             self._device = torch.device("cpu")
-        self._dtype = self.config.torch_dtype if self.config.torch_dtype is not None else torch.float32
         self.model.to(self._device)
+        self._dtype = self.config.torch_dtype if self.config.torch_dtype is not None else torch.float32
         self.model_save_dir = model_save_dir
         self._is_ipex_exported = _is_patched_with_ipex(model, self.export_feature)
         if self._device.type == "cpu":
@@ -195,10 +194,17 @@ class IPEXModel(OptimizedModel):
 
         model = TasksManager.get_model_from_task(task, model_id, **model_kwargs)
 
+        def memory_usage(name):
+            memory_reserved = round(torch.xpu.memory_reserved() / 1024**3, 3)
+            memory_allocated = round(torch.xpu.memory_allocated() / 1024**3, 3)
+            print(name, " memory_allocated:", memory_allocated, "GB, memory used total::", memory_reserved, "GB")
+            
         if is_torch_xpu_available(check_device=True):
             model.to("xpu:0")
+            memory_usage("before patching")
             if _is_patched_with_ipex(model, task):
                 model = _patch_model(model)
+            memory_usage("after patching")
         else:
             model = ipex_jit_trace(model, task, use_cache)
             config.torchscript = True
