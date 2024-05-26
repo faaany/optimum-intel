@@ -53,7 +53,7 @@ from optimum.utils import NormalizedConfigManager
 from ...exporters.ipex.model_patcher import _IPEX_EXPORTED_TASK, _patch_model
 from ..generation.modeling import prepare_jit_inputs
 from ..utils.import_utils import is_ipex_version, is_torch_version, is_transformers_version
-from ..utils.modeling_utils import MULTI_QUERY_ATTN_MODELS, patch_decoder_attention_mask
+from ..utils.modeling_utils import MULTI_QUERY_ATTN_MODELS, patch_decoder_attention_mask, recursive_to_device
 
 
 logger = logging.getLogger(__name__)
@@ -168,6 +168,7 @@ class IPEXModel(OptimizedModel):
         local_files_only: bool = False,
         torch_dtype: Optional[Union[str, "torch.dtype"]] = None,
         trust_remote_code: bool = False,
+        _commit_hash: str = None,
     ):
         if use_auth_token is not None:
             warnings.warn(
@@ -190,6 +191,7 @@ class IPEXModel(OptimizedModel):
             "force_download": force_download,
             "torch_dtype": torch_dtype,
             "trust_remote_code": trust_remote_code,
+            "_commit_hash": _commit_hash,
         }
 
         model = TasksManager.get_model_from_task(task, model_id, **model_kwargs)
@@ -335,6 +337,8 @@ class IPEXModel(OptimizedModel):
         if not self._is_ipex_exported:
             use_cache = "past_key_values" in self.input_names
             dummy_inputs = prepare_jit_inputs(self, self.export_feature, use_cache)
+            if self._device.type != "cpu":
+                dummy_inputs = recursive_to_device(value=dummy_inputs, device=self._device)
             for _ in range(2):
                 self(**dummy_inputs)
 
